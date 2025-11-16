@@ -11,7 +11,11 @@ function App() {
   const { addActivity, setConnected, setDatabaseConfig } = useActivityStore();
 
   useEffect(() => {
-    const newSocket = io('http://localhost:3000');
+    const newSocket = io("http://localhost:3000", {
+  transports: ["websocket"],  // force only websocket
+  withCredentials: true
+});
+
     setSocket(newSocket);
 
     newSocket.on('connect', () => setConnected(true));

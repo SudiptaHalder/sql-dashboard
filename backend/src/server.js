@@ -37,10 +37,15 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Socket.io setup
 const io = new Server(server, {
-  cors: corsOptions
+  cors: {
+    origin: "http://localhost:5173",
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ["websocket"]
 });
+
 
 // WebSocket connection handling
 io.on('connection', (socket) => {
