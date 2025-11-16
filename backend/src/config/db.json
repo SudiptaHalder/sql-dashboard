@@ -1,0 +1,7 @@
+{
+  "host": "localhost",
+  "user": "root",
+  "password": "root",
+  "database": "habit_coach",
+  "port": 3306
+}
