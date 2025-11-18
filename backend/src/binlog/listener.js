@@ -1,90 +1,90 @@
-import MySQL from 'mysql2';
+import { readFileSync, existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import MySQLEvents from "@rodrigogs/mysql-events";
 
-class BinlogListener {
-  constructor() {
-    this.connection = null;
-    this.io = null;
-    this.currentConfig = null;
-    this.isConnected = false;
-  }
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const configPath = join(__dirname, "../../db/config.json");
 
-  async start(io, config) {
-    this.io = io;
-    this.currentConfig = config;
-    
-    console.log('🚀 Starting REAL database connection');
-    
+let instance = null;
+
+export default {
+  start: async (io) => {
     try {
-      await this.connectToDatabase(config);
-      console.log('✅ REAL database connected - Ready for real data');
-    } catch (error) {
-      console.error('❌ REAL database connection failed:', error.message);
-    }
-  }
+      if (!existsSync(configPath)) {
+        console.log("⚠️ No DB config.json found. Binlog listener disabled.");
+        return;
+      }
 
-  async connectToDatabase(config) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        console.log('🔗 Connecting to REAL database...');
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
 
-        this.connection = MySQL.createConnection({
+      console.log("🔄 Connecting to MySQL binlog...");
+
+      instance = new MySQLEvents(
+        {
           host: config.host,
-          port: config.port || 3306,
           user: config.user,
           password: config.password,
-          database: config.database,
-          charset: 'utf8mb4',
-          connectTimeout: 10000,
-          insecureAuth: true
-        });
+          port: config.port || 3306,
+        },
+        {
+          startAtEnd: true, // Start from the latest binlog event
+        }
+      );
 
-        await new Promise((resolve, reject) => {
-          this.connection.connect(err => {
-            if (err) {
-              reject(err);
-            } else {
-              this.isConnected = true;
-              console.log('✅ REAL database connected successfully');
-              
-              this.io.emit('database_status', {
-                status: 'connected',
-                message: 'Connected to REAL database - Browse your tables',
-                database: config.database,
-                timestamp: new Date().toISOString(),
-                realData: true
-              });
-              
-              resolve();
-            }
-          });
-        });
+      await instance.start();
 
-        resolve();
+      console.log("🔥 Binlog listener started");
 
-      } catch (error) {
-        this.isConnected = false;
-        reject(error);
-      }
-    });
-  }
+      instance.addTrigger({
+        name: "monitor-all-tables",
+        expression: `${config.database}.*`,
+        statement: MySQLEvents.STATEMENTS.ALL,
+        onEvent: (event) => {
+          const { type, table, affectedRows } = event;
 
-  stop() {
-    if (this.connection && this.connection.state !== 'disconnected') {
-      this.connection.end();
+          let activity = {
+            id: Date.now(),
+            type,
+            table,
+            timestamp: new Date(),
+            real: true,
+          };
+
+          if (type === "INSERT") {
+            activity.after = affectedRows[0].after;
+          }
+
+          if (type === "UPDATE") {
+            activity.before = affectedRows[0].before;
+            activity.after = affectedRows[0].after;
+          }
+
+          if (type === "DELETE") {
+            activity.before = affectedRows[0].before;
+          }
+
+          io.emit("sql_activity", activity);
+        },
+      });
+
+      instance.on(MySQLEvents.EVENTS.CONNECTION_ERROR, (err) =>
+        console.log("❌ Binlog connection error:", err)
+      );
+
+      instance.on(MySQLEvents.EVENTS.ZONGJI_ERROR, (err) =>
+        console.log("❌ Binlog ZongJi error:", err)
+      );
+    } catch (err) {
+      console.error("❌ Failed to start binlog:", err.message);
     }
-    this.connection = null;
-    this.isConnected = false;
-    console.log('🛑 Database connection closed');
-  }
+  },
 
-  getStatus() {
-    return {
-      isConnected: this.isConnected,
-      database: this.currentConfig?.database,
-      status: this.isConnected ? 'connected' : 'disconnected',
-      realData: true
-    };
-  }
-}
-
-export default new BinlogListener;
+  stop: async () => {
+    if (instance) {
+      console.log("🛑 Stopping MySQL event listener...");
+      await instance.stop();
+      instance = null;
+    }
+  },
+};
