@@ -1,50 +1,36 @@
+import "dotenv/config";
 import crypto from "crypto";
-import dotenv from "dotenv";
-import path from "path";
-import { fileURLToPath } from "url";
 
-// Load .env manually
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.join(__dirname, "../../.env") });
+const KEY = process.env.ENCRYPTION_KEY;
 
-let KEY = process.env.ENCRYPTION_KEY;
-
-// 🔥 VERY IMPORTANT: Avoid crashing if KEY is missing
 if (!KEY || KEY.length !== 32) {
-  console.warn(
-    "⚠️ WARNING: ENCRYPTION_KEY missing or invalid. Using temporary fallback key."
-  );
-  KEY = "00000000000000000000000000000000"; // 32 chars fallback
+  console.error("❌ ENCRYPTION_KEY must be 32 chars.");
+  throw new Error("ENCRYPTION_KEY must be exactly 32 characters!");
 }
 
-const ALGO = "aes-256-gcm";
+export function encryptJSON(data) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv("aes-256-gcm", Buffer.from(KEY), iv);
 
-// Encrypt JSON
-export function encryptJSON(obj) {
-  const iv = crypto.randomBytes(12);
+  const jsonStr = JSON.stringify(data);
+  const encrypted = Buffer.concat([cipher.update(jsonStr, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
 
-  const cipher = crypto.createCipheriv(ALGO, KEY, iv);
-  let encrypted = cipher.update(JSON.stringify(obj), "utf8", "hex");
-  encrypted += cipher.final("hex");
-
-  const tag = cipher.getAuthTag().toString("hex");
-
-  return { iv: iv.toString("hex"), content: encrypted, tag };
+  return {
+    iv: iv.toString("hex"),
+    content: encrypted.toString("hex"),
+    tag: tag.toString("hex"),
+  };
 }
 
-// Decrypt JSON
 export function decryptJSON(enc) {
-  const decipher = crypto.createDecipheriv(
-    ALGO,
-    KEY,
-    Buffer.from(enc.iv, "hex")
-  );
+  const iv = Buffer.from(enc.iv, "hex");
+  const encrypted = Buffer.from(enc.content, "hex");
+  const tag = Buffer.from(enc.tag, "hex");
 
-  decipher.setAuthTag(Buffer.from(enc.tag, "hex"));
+  const decipher = crypto.createDecipheriv("aes-256-gcm", Buffer.from(KEY), iv);
+  decipher.setAuthTag(tag);
 
-  let decrypted = decipher.update(enc.content, "hex", "utf8");
-  decrypted += decipher.final("utf8");
-
-  return JSON.parse(decrypted);
+  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+  return JSON.parse(decrypted.toString("utf8"));
 }

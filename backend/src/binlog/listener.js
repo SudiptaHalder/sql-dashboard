@@ -1,90 +1,97 @@
-import { readFileSync, existsSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-import MySQLEvents from "@rodrigogs/mysql-events";
+import fs from "fs";
+import path from "path";
+import mysql from "mysql2/promise";
+import ZongJi from "zongji";
+import { decryptJSON } from "../utils/crypto.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const configPath = join(__dirname, "../../db/config.json");
+const CONFIG_FILE = path.join(process.cwd(), "backend/db/config.enc.json");
 
-let instance = null;
+let ioInstance = null;
 
 export default {
-  start: async (io) => {
-    try {
-      if (!existsSync(configPath)) {
-        console.log("⚠️ No DB config.json found. Binlog listener disabled.");
+  attachIO(io) {
+    ioInstance = io;
+  },
+
+  async start() {
+    console.log("🚀 Starting MySQL Binlog Listener...");
+
+    if (!fs.existsSync(CONFIG_FILE)) {
+      console.log("ℹ️ No DB config found. Skipping binlog.");
+      return;
+    }
+
+    const enc = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+    const cfg = decryptJSON(enc);
+
+    // For binlog: REPLICATION user is required
+    const binlogConfig = {
+      host: cfg.host,
+      port: cfg.port,
+      user: cfg.user,            // Should be binlog_user ideally
+      password: cfg.password,
+      database: cfg.database,
+      serverId: 1,
+      startAtEnd: true,
+    };
+
+    const zongji = new ZongJi(binlogConfig);
+
+    // Only row events
+    zongji.on("binlog", (event) => {
+      if (!event.getEventName) return;
+
+      const eventType = event.getEventName();
+
+      // ⛔ Skip non-table events
+      const validEvents = ["writerows", "updaterows", "deleterows"];
+      if (!validEvents.includes(eventType.toLowerCase())) {
         return;
       }
 
-      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      const table = event.tableMap[event.tableId];
+      if (!table) return;
 
-      console.log("🔄 Connecting to MySQL binlog...");
+      const tableName = table.tableName;
 
-      instance = new MySQLEvents(
-        {
-          host: config.host,
-          user: config.user,
-          password: config.password,
-          port: config.port || 3306,
-        },
-        {
-          startAtEnd: true, // Start from the latest binlog event
-        }
-      );
+      let activity = {
+        id: Date.now(),
+        table: tableName,
+        timestamp: new Date().toISOString(),
+        type: "",
+        before: null,
+        after: null,
+        real: true,
+      };
 
-      await instance.start();
+      if (eventType === "writerows") {
+        activity.type = "INSERT";
+        activity.after = event.rows[0];
+      }
 
-      console.log("🔥 Binlog listener started");
+      if (eventType === "updaterows") {
+        activity.type = "UPDATE";
+        activity.before = event.rows[0].before;
+        activity.after = event.rows[0].after;
+      }
 
-      instance.addTrigger({
-        name: "monitor-all-tables",
-        expression: `${config.database}.*`,
-        statement: MySQLEvents.STATEMENTS.ALL,
-        onEvent: (event) => {
-          const { type, table, affectedRows } = event;
+      if (eventType === "deleterows") {
+        activity.type = "DELETE";
+        activity.before = event.rows[0];
+      }
 
-          let activity = {
-            id: Date.now(),
-            type,
-            table,
-            timestamp: new Date(),
-            real: true,
-          };
+      console.log("📦 EVENT:", activity);
 
-          if (type === "INSERT") {
-            activity.after = affectedRows[0].after;
-          }
+      if (ioInstance) ioInstance.emit("db_event", activity);
+    });
 
-          if (type === "UPDATE") {
-            activity.before = affectedRows[0].before;
-            activity.after = affectedRows[0].after;
-          }
+    zongji.start({
+      includeEvents: ["writerows", "updaterows", "deleterows"],
+      includeSchema: {
+        [cfg.database]: true,
+      },
+    });
 
-          if (type === "DELETE") {
-            activity.before = affectedRows[0].before;
-          }
-
-          io.emit("sql_activity", activity);
-        },
-      });
-
-      instance.on(MySQLEvents.EVENTS.CONNECTION_ERROR, (err) =>
-        console.log("❌ Binlog connection error:", err)
-      );
-
-      instance.on(MySQLEvents.EVENTS.ZONGJI_ERROR, (err) =>
-        console.log("❌ Binlog ZongJi error:", err)
-      );
-    } catch (err) {
-      console.error("❌ Failed to start binlog:", err.message);
-    }
-  },
-
-  stop: async () => {
-    if (instance) {
-      console.log("🛑 Stopping MySQL event listener...");
-      await instance.stop();
-      instance = null;
-    }
+    console.log("✔️ Binlog listener running");
   },
 };

@@ -1,3 +1,4 @@
+// backend/src/routes/configRoutes.js
 import express from "express";
 import fs from "fs";
 import mysql from "mysql2/promise";
@@ -11,28 +12,31 @@ const router = express.Router();
 const CONFIG_DIR = join(__dirname, "../../db");
 const CONFIG_FILE = join(CONFIG_DIR, "config.enc.json");
 
-// Ensure config directory exists
+// Ensure db directory exists
 if (!fs.existsSync(CONFIG_DIR)) {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
 }
 
-/* ────────────────────────────────────────────────────────────────
-   SAVE CONFIG (Encrypted)
-────────────────────────────────────────────────────────────────── */
-router.post("/database", async (req, res) => {
+/* =====================================================
+   SAVE ENCRYPTED CONFIG
+===================================================== */
+router.post("/database", (req, res) => {
   try {
     const encrypted = encryptJSON(req.body);
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(encrypted, null, 2));
 
-    res.json({ success: true, message: "Configuration saved (encrypted)." });
+    return res.json({
+      success: true,
+      message: "Database configuration saved & encrypted.",
+    });
   } catch (err) {
-    res.json({ success: false, error: err.message });
+    return res.json({ success: false, error: err.message });
   }
 });
 
-/* ────────────────────────────────────────────────────────────────
-   LOAD CONFIG (Decrypted)
-────────────────────────────────────────────────────────────────── */
+/* =====================================================
+   LOAD DECRYPTED CONFIG (password hidden)
+===================================================== */
 router.get("/database", (req, res) => {
   try {
     if (!fs.existsSync(CONFIG_FILE)) {
@@ -42,42 +46,42 @@ router.get("/database", (req, res) => {
     const encrypted = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
     const decrypted = decryptJSON(encrypted);
 
-    // Mask password on UI
-    decrypted.password = "******";
+    const safeConfig = {
+      ...decrypted,
+      password: "******", // hide password
+    };
 
-    res.json({ success: true, config: decrypted });
+    return res.json({ success: true, config: safeConfig });
   } catch (err) {
-    res.json({ success: false, error: err.message });
+    return res.json({ success: false, error: err.message });
   }
 });
 
-/* ────────────────────────────────────────────────────────────────
-   TEST CONNECTION (Frontend Test Button)
-────────────────────────────────────────────────────────────────── */
+/* =====================================================
+   TEST MYSQL CONNECTION
+===================================================== */
 router.post("/test-connection", async (req, res) => {
   try {
-    const { host, port, user, password, database } = req.body;
-
     const conn = await mysql.createConnection({
-      host,
-      port,
-      user,
-      password,
-      database,
+      host: req.body.host,
+      port: req.body.port,
+      user: req.body.user,
+      password: req.body.password,
+      database: req.body.database,
     });
 
     await conn.query("SELECT 1");
-    conn.end();
+    await conn.end();
 
-    res.json({ success: true, message: "MySQL connection successful!" });
+    return res.json({ success: true, message: "MySQL connection successful!" });
   } catch (err) {
-    res.json({ success: false, error: err.message });
+    return res.json({ success: false, error: err.message });
   }
 });
 
-/* ────────────────────────────────────────────────────────────────
-   GET TABLE LIST (Dashboard)
-────────────────────────────────────────────────────────────────── */
+/* =====================================================
+   RETURN ALL TABLES (decrypted config)
+===================================================== */
 router.get("/tables", async (req, res) => {
   try {
     if (!fs.existsSync(CONFIG_FILE)) {
@@ -89,75 +93,62 @@ router.get("/tables", async (req, res) => {
 
     const conn = await mysql.createConnection(cfg);
 
-    const [rows] = await conn.query(
-      `
-      SELECT 
-        table_name,
-        table_rows,
-        data_length,
-        index_length
-      FROM information_schema.tables
-      WHERE table_schema = ?
-      ORDER BY table_name
-      `,
+    const [tables] = await conn.query(
+      `SELECT 
+         TABLE_NAME as table_name,
+         TABLE_ROWS as table_rows,
+         DATA_LENGTH as data_length,
+         INDEX_LENGTH as index_length
+       FROM information_schema.tables
+       WHERE table_schema = ?`,
       [cfg.database]
     );
 
-    // Fix MariaDB nulls
-    const tables = rows.map((t) => ({
-      table_name: t.table_name,
-      table_rows: t.table_rows ?? 0,
-      data_length: t.data_length ?? 0,
-      index_length: t.index_length ?? 0,
-    }));
+    await conn.end();
 
-    res.json({ success: true, tables });
+    return res.json({ success: true, tables });
   } catch (err) {
-    res.json({ success: false, error: err.message });
+    return res.json({ success: false, error: err.message });
   }
 });
 
-/* ────────────────────────────────────────────────────────────────
-   GET SPECIFIC TABLE DATA
-────────────────────────────────────────────────────────────────── */
+/* =====================================================
+   RETURN ROWS FROM SPECIFIC TABLE
+===================================================== */
 router.get("/tables/:table/data", async (req, res) => {
   try {
-    const { table } = req.params;
+    const tableName = req.params.table;
 
     if (!fs.existsSync(CONFIG_FILE)) {
       return res.json({ success: false, error: "No DB config found." });
     }
 
-    const encrypted = JSON.parse(fs.readFileSync(CONFIG_FILE));
+    const encrypted = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
     const cfg = decryptJSON(encrypted);
 
     const conn = await mysql.createConnection(cfg);
 
-    // Fetch column names
+    // Get column names
     const [cols] = await conn.query(
-      `
-      SELECT COLUMN_NAME
-      FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-      ORDER BY ORDINAL_POSITION
-      `,
-      [cfg.database, table]
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+       ORDER BY ORDINAL_POSITION`,
+      [cfg.database, tableName]
     );
 
-    const columns = cols.map((c) => c.COLUMN_NAME);
+    const columnNames = cols.map((c) => c.COLUMN_NAME);
 
-    // Fetch table rows
-    const [rows] = await conn.query(`SELECT * FROM \`${table}\` LIMIT 200`);
+    // Fetch table data
+    const [rows] = await conn.query(`SELECT * FROM \`${tableName}\` LIMIT 200`);
 
-    res.json({
+    await conn.end();
+
+    return res.json({
       success: true,
-      data: {
-        columns,
-        rows,
-      },
+      data: { columns: columnNames, rows },
     });
   } catch (err) {
-    res.json({ success: false, error: err.message });
+    return res.json({ success: false, error: err.message });
   }
 });
 
